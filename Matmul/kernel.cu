@@ -4,10 +4,9 @@
 #include <functional>
 #include <iostream>
 #include <vector>
+#include <chrono>
 
-using std::cout;
-using std::generate;
-using std::vector;
+using namespace std;
 
 __global__ void matrixMul(const int* a, const int* b, int* c, int N) {
     // Compute each thread's global row and column index
@@ -77,8 +76,14 @@ int main() {
     dim3 threads(THREADS, THREADS);
     dim3 blocks(BLOCKS, BLOCKS);
 
+    chrono::system_clock::time_point start = chrono::system_clock::now();
+
     // Launch kernel
     matrixMul << <blocks, threads >> > (d_a, d_b, d_c, N);
+
+    chrono::system_clock::time_point end = chrono::system_clock::now();
+    auto time = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
+
 
     // Copy back to the host
     cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost);
@@ -87,6 +92,9 @@ int main() {
     verify_result(h_a, h_b, h_c, N);
 
     cout << "COMPLETED SUCCESSFULLY\n";
+
+    cout << "TIME : " << time << "ns\n";
+
 
     // Free memory on device
     cudaFree(d_a);
