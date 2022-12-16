@@ -23,12 +23,14 @@ __global__ void matrixMul(const int* a, const int* b, int* c, int N) {
 
 // Check result on the CPU
 void verify_result(vector<int>& a, vector<int>& b, vector<int>& c, int N) {
+    chrono::system_clock::time_point startCpu = chrono::system_clock::now();
     // For every row...
     for (int i = 0; i < N; i++) {
         // For every column...
         for (int j = 0; j < N; j++) {
             // For every element in the row-column pair
             int tmp = 0;
+
             for (int k = 0; k < N; k++) {
                 // Accumulate the partial results
                 tmp += a[i * N + k] * b[k * N + j];
@@ -38,6 +40,9 @@ void verify_result(vector<int>& a, vector<int>& b, vector<int>& c, int N) {
             assert(tmp == c[i * N + j]);
         }
     }
+    chrono::system_clock::time_point endCpu = chrono::system_clock::now();
+    auto timeCpu = chrono::duration_cast<chrono::nanoseconds>(endCpu - startCpu).count();
+    cout << "CPU TIME : " << timeCpu << "ns\n";
 }
 
 int main() {
@@ -84,16 +89,12 @@ int main() {
     chrono::system_clock::time_point end = chrono::system_clock::now();
     auto time = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
 
-
     // Copy back to the host
     cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost);
 
+    cout << "GPU TIME : " << time << "ns\n";
     // Check result
     verify_result(h_a, h_b, h_c, N);
-
-    cout << "COMPLETED SUCCESSFULLY\n";
-
-    cout << "TIME : " << time << "ns\n";
 
 
     // Free memory on device

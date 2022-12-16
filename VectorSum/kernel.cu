@@ -1,121 +1,110 @@
-﻿
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
+﻿#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
+#include <math.h>
+#include <chrono>
+#include <iostream>
 
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
+#define SIZE 256
+#define SHMEM_SIZE 256 * 4
 
-__global__ void addKernel(int *c, const int *a, const int *b)
-{
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+using namespace std;
+
+void verify_result(int* h_v, int N, int GpuRes) {
+	chrono::system_clock::time_point startCpu = chrono::system_clock::now();
+	for (int i = 1; i < N; i++) {
+		h_v[0] += h_v[i];
+	}
+	chrono::system_clock::time_point endCpu = chrono::system_clock::now();
+	auto timeCpu = chrono::duration_cast<chrono::nanoseconds>(endCpu - startCpu).count();
+	cout << "CPU TIME : " << timeCpu << "ns\n";
+	//assert(h_v[0] == GpuRes);
+	printf("CPU res is %d \n", h_v[0]);
 }
 
-int main()
-{
-    const int arraySize = 5;
-    const int a[arraySize] = { 1, 2, 3, 4, 5 };
-    const int b[arraySize] = { 10, 20, 30, 40, 50 };
-    int c[arraySize] = { 0 };
+__global__ void sum_reduction(int* v, int* v_r) {
+	// Allocate shared memory
+	__shared__ int partial_sum[SHMEM_SIZE];
 
-    // Add vectors in parallel.
-    cudaError_t cudaStatus = addWithCuda(c, a, b, arraySize);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addWithCuda failed!");
-        return 1;
-    }
+	// Calculate thread ID
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    printf("{1,2,3,4,5} + {10,20,30,40,50} = {%d,%d,%d,%d,%d}\n",
-        c[0], c[1], c[2], c[3], c[4]);
+	// Load elements into shared memory
+	partial_sum[threadIdx.x] = v[tid];
+	__syncthreads();
 
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
-    cudaStatus = cudaDeviceReset();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceReset failed!");
-        return 1;
-    }
+	// Start at 1/2 block stride and divide by two each iteration
+	for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+		// Each thread does work unless it is further than the stride
+		if (threadIdx.x < s) {
+			partial_sum[threadIdx.x] += partial_sum[threadIdx.x + s];
+		}
+		__syncthreads();
+	}
 
-    return 0;
+	// Let the thread 0 for this block write it's result to main memory
+	// Result is inexed by this block
+	if (threadIdx.x == 0) {
+		v_r[blockIdx.x] = partial_sum[0];
+	}
 }
 
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size)
-{
-    int *dev_a = 0;
-    int *dev_b = 0;
-    int *dev_c = 0;
-    cudaError_t cudaStatus;
+void initialize_vector(int* v, int n) {
+	for (int i = 0; i < n; i++) {
+		v[i] = rand() % 10;
+	}
+}
 
-    // Choose which GPU to run on, change this on a multi-GPU system.
-    cudaStatus = cudaSetDevice(0);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
-    }
+int main() {
+	// Vector size
+	int n = 1 << 8;
+	size_t bytes = n * sizeof(int);
 
-    // Allocate GPU buffers for three vectors (two input, one output)    .
-    cudaStatus = cudaMalloc((void**)&dev_c, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Original vector and result vector
+	int* h_v, * h_v_r;
+	int* d_v, * d_v_r;
 
-    cudaStatus = cudaMalloc((void**)&dev_a, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Allocate memory
+	h_v = (int*)malloc(bytes);
+	h_v_r = (int*)malloc(bytes);
+	cudaMalloc(&d_v, bytes);
+	cudaMalloc(&d_v_r, bytes);
 
-    cudaStatus = cudaMalloc((void**)&dev_b, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Initialize vector
+	initialize_vector(h_v, n);
 
-    // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// Copy to device
+	cudaMemcpy(d_v, h_v, bytes, cudaMemcpyHostToDevice);
 
-    cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// TB Size
+	int TB_SIZE = SIZE;
 
-    // Launch a kernel on the GPU with one thread for each element.
-    addKernel<<<1, size>>>(dev_c, dev_a, dev_b);
+	// Grid Size (No padding)
+	int GRID_SIZE = n / TB_SIZE;
 
-    // Check for any errors launching the kernel
-    cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-        goto Error;
-    }
-    
-    // cudaDeviceSynchronize waits for the kernel to finish, and returns
-    // any errors encountered during the launch.
-    cudaStatus = cudaDeviceSynchronize();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-        goto Error;
-    }
+	chrono::system_clock::time_point start = chrono::system_clock::now();
 
-    // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// Call kernel
+	sum_reduction << <GRID_SIZE, TB_SIZE >> > (d_v, d_v_r);
 
-Error:
-    cudaFree(dev_c);
-    cudaFree(dev_a);
-    cudaFree(dev_b);
-    
-    return cudaStatus;
+	sum_reduction << <1, TB_SIZE >> > (d_v_r, d_v_r);
+
+	chrono::system_clock::time_point end = chrono::system_clock::now();
+	auto time = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
+
+	// Copy to host;
+	cudaMemcpy(h_v_r, d_v_r, bytes, cudaMemcpyDeviceToHost);
+
+	// Print the result
+	cout << "GPU TIME : " << time << "ns\n";
+	printf("GPU result is %d \n", h_v_r[0]);
+	verify_result(h_v, n, h_v_r[0]);
+	//assert(h_v_r[0] == 65536);
+	/*for (int i = 0; i < n; i++) {
+		printf("The %d element is %d \n", i + 1, h_v[i]);
+	}*/
+
+	return 0;
 }
